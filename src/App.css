@@ -1,0 +1,42 @@
+.App-header {
+  position: fixed;
+  z-index: 1;
+  width: 100%;
+}
+
+.App-header .App-logo {
+  float: left;
+  margin: 5px 5px 5px 0;
+  height: 80%;
+}
+
+.App-header .App-title {
+  float: left;
+  margin-top: 8px;
+}
+
+.App-header .App-header-right {
+  float: right;
+}
+
+.App-content {
+  margin-top: 80px;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.App-footer {
+  text-align: center;
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+  padding: 0;
+}
+
+.App-footer img {
+  margin: 8px;
+}

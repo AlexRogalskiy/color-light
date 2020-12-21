@@ -1,0 +1,11 @@
+.brightness-slider {
+  width: auto;
+}
+
+.brightness-slider .ant-slider-rail {
+  background: linear-gradient(to right, #444, white);
+}
+
+.brightness-slider .ant-slider-track {
+  opacity: 0;
+}

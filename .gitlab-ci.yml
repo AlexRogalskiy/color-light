@@ -1,0 +1,182 @@
+stages:
+ - build
+ - test
+ - coverage
+ - staging
+ - test_staging
+ - release
+
+variables:
+  # Use TLS https://docs.gitlab.com/ee/ci/docker/using_docker_build.html#tls-enabled
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  CONTAINER_TEST_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  CONTAINER_RELEASE_IMAGE: $CI_REGISTRY_IMAGE:latest
+  RF_BROWSER_DOCKER_IMAGE: docker.pkg.github.com/marketsquare/robotframework-browser/rfbrowser-stable:v2.1.0
+
+###############
+#  Templates  #
+###############
+
+# Privions a step with a Docker-in-Docker environment
+.dind_template: &dind_definition
+  image: docker:19.03.12
+  services:
+    - docker:19.03.12-dind
+  before_script:
+    # Authenticate to the container registry
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+# Unit tests the application directly within Node.js
+.unit_test_local_template: &unit_test_local_definition
+  stage: test
+  script:
+    # Install all dependencies
+    - yarn install --frozen-lockfile
+    # Run the unit tests
+    - yarn test
+    # Attempt to build
+    - yarn build
+  cache:
+    key: 
+      files:
+        - yarn.lock
+    paths:
+      - .yarn
+      - node_modules
+  variables:
+    YARN_CONFIG_CACHE: "$CI_PROJECT_DIR/.yarn"
+  artifacts:
+    paths:
+      - coverage
+  needs: []
+
+#######################
+#  Unit Test Locally  #
+#######################
+
+unit_test_local_node12:
+  <<: *unit_test_local_definition
+  image: node:12
+
+unit_test_local_node14:
+  <<: *unit_test_local_definition
+  image: node:14
+
+unit_test_local_node15:
+  <<: *unit_test_local_definition
+  image: node:15
+
+#############################
+#  Create and Test Staging  #
+#############################
+
+deploy_staging:
+  stage: staging
+  image: node:14
+  script:
+    # Deploy a staging environment to Vercel
+    - npm install -g vercel@20
+    - export STAGING_URL=$(vercel --token $VERCEL_TOKEN --scope $VERCEL_SCOPE --confirm)
+    # Validate that our deployment resulted in a publicly accessible website
+    - curl $STAGING_URL
+    # Make the staging url available for future steps
+    - echo "Staging Deployment Live at $STAGING_URL"
+    - echo "STAGING_URL=$STAGING_URL" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  needs: []
+
+e2e_test_staging:
+  stage: test_staging
+  image: docker:19.03.12
+  services:
+    - docker:19.03.12-dind
+  script:
+    - echo "Testing Staging Deployment $STAGING_URL"
+    - docker login docker.pkg.github.com --username $GITHUB_CONTAINER_REGISTRY_USERNAME --password $GITHUB_CONTAINER_REGISTRY_TOKEN
+    - |
+      docker run --rm -v $(pwd)/e2e/tests/:/test \
+        $RF_BROWSER_DOCKER_IMAGE \
+        bash -c "robot --variable headless:true --variable hostname:$STAGING_URL/?env=ci-staging-$CI_JOB_ID --outputdir /test/output /test"
+  artifacts:
+    paths:
+      - e2e/tests/output/
+    when: always
+  needs:
+    - job: deploy_staging
+
+###################
+#  Code Analysis  #
+###################
+
+coverage:
+  stage: coverage
+  image: node:14
+  script:
+    # Upload code coverage
+    - bash <(curl -s https://codecov.io/bash) -t $CODECOV_TOKEN
+  needs:
+    - job: unit_test_local_node15
+  allow_failure: true
+
+###########################################
+#  Docker Image: Build, Test and Release  #
+###########################################
+
+build-docker-image:
+  <<: *dind_definition
+  stage: build
+  script:
+    # Build test image
+    - docker build --pull -t $CONTAINER_TEST_IMAGE .
+    # Push the test image to the container registry
+    - docker push $CONTAINER_TEST_IMAGE
+  needs: []
+
+test-docker-image:
+  <<: *dind_definition
+  stage: test
+  script:
+    # Create a Docker network to connect the test enviornment and runner images
+    - docker network create $DOCKER_NETWORK_NAME
+    # Run the test image in the background
+    - |
+      docker run \
+        --detach --name teknifront --net $DOCKER_NETWORK_NAME --rm \
+        $CONTAINER_TEST_IMAGE
+    # Log into Github Container Registry to be able to run the RF-Browser image
+    - docker login docker.pkg.github.com --username $GITHUB_CONTAINER_REGISTRY_USERNAME --password $GITHUB_CONTAINER_REGISTRY_TOKEN
+    # Run our end-to-end tests against the test environment
+    - |
+      docker run --volume $(pwd)/e2e/tests/:/test --net $DOCKER_NETWORK_NAME --rm \
+        $RF_BROWSER_DOCKER_IMAGE \
+        bash -c "robot --variable headless:true --variable hostname:http://teknifront/?env=ci-docker-$CI_JOB_ID --outputdir /test/output /test"
+  variables:
+    DOCKER_NETWORK_NAME: e2e-test-network
+    TEKNIFRONT_PORT: 8080
+  artifacts:
+    paths:
+      - e2e/tests/output/
+    when: always
+  needs:
+    - job: build-docker-image
+
+release-docker-image:
+  <<: *dind_definition
+  stage: release
+  script:
+    # Pull the images we build earlier
+    - docker pull $CONTAINER_TEST_IMAGE
+    # Tag it as the release candidate
+    - docker tag $CONTAINER_TEST_IMAGE $CONTAINER_RELEASE_IMAGE
+    # Push it as the release candidate
+    - docker push $CONTAINER_RELEASE_IMAGE
+  needs:
+    - job: build-docker-image
+    - job: test-docker-image
+    - job: e2e_test_staging
+    - job: unit_test_local_node14
+  only:
+    - master
